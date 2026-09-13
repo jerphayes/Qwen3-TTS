@@ -245,7 +245,9 @@ class MultiHeadAttention(nn.Module):
         attn_mask = torch.arange(max_seqlen, device=q.device)[None, :] < torch.tensor(seqlens, device=q.device)[:, None]
         attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
 
-        attn_mask = attn_mask.masked_fill(attn_mask == 0, -torch.finfo(q.dtype).max)
+        # Build the additive mask as a float tensor: `masked_fill` on the bool mask itself would cast
+        # `-finfo.max` to `True` and leave the padded keys unmasked.
+        attn_mask = torch.zeros_like(attn_mask, dtype=q.dtype).masked_fill(~attn_mask, -torch.finfo(q.dtype).max)
 
         attn_scores = torch.matmul(q_padded, k_padded.transpose(-2, -1)) * scale
         attn_scores = attn_scores + attn_mask
