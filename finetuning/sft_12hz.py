@@ -28,9 +28,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig
 
 target_speaker_embedding = None
-def train():
-    global target_speaker_embedding
-
+def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--init_model_path", type=str, default="Qwen/Qwen3-TTS-12Hz-1.7B-Base")
     parser.add_argument("--output_model_path", type=str, default="output")
@@ -39,7 +37,14 @@ def train():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
-    args = parser.parse_args()
+    parser.add_argument("--attn_implementation", type=str, default="flash_attention_2")
+    return parser
+
+
+def train():
+    global target_speaker_embedding
+
+    args = build_arg_parser().parse_args()
 
     accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16", log_with="tensorboard")
 
@@ -48,7 +53,7 @@ def train():
     qwen3tts = Qwen3TTSModel.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=args.attn_implementation,
     )
     config = AutoConfig.from_pretrained(MODEL_PATH)
 
