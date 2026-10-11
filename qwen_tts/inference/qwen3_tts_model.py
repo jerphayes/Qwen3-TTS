@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import contextlib
 import io
 import urllib.request
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ class Qwen3TTSModel:
         self.model = model
         self.processor = processor
         self.generate_defaults = generate_defaults or {}
+        self._cuda_graph_engine = None  # created on the first generate_voice_clone(use_cuda_graph=True)
 
         self.device = getattr(model, "device", None)
         if self.device is None:
@@ -284,6 +286,16 @@ class Qwen3TTSModel:
             input_ids.append(input_id)
         return input_ids
 
+    def _cuda_graphs(self):
+        """The batched CUDA-graph engine, as a context manager that swaps it in for `talker.generate`."""
+        if not torch.cuda.is_available():
+            raise RuntimeError("use_cuda_graph=True needs a CUDA device")
+        if self._cuda_graph_engine is None:
+            from .cuda_graph import BatchedEngine
+
+            self._cuda_graph_engine = BatchedEngine(self)
+        return self._cuda_graph_engine
+
     def _merge_generate_kwargs(
         self,
         do_sample: Optional[bool] = None,
@@ -476,6 +488,7 @@ class Qwen3TTSModel:
         x_vector_only_mode: Union[bool, List[bool]] = False,
         voice_clone_prompt: Optional[Union[Dict[str, Any], List[VoiceClonePromptItem]]] = None,
         non_streaming_mode: bool = False,
+        use_cuda_graph: bool = False,
         **kwargs,
     ) -> Tuple[List[np.ndarray], int]:
         """
@@ -513,6 +526,15 @@ class Qwen3TTSModel:
             non_streaming_mode:
                 Using non-streaming text input, this option currently only simulates streaming text input when set to `false`, 
                 rather than enabling true streaming input or streaming generation.
+            use_cuda_graph:
+                Decode with batched CUDA graphs (`cuda_graph.py`, CUDA only). Validated with the 12Hz
+                1.7B Base model loaded using `attn_implementation="sdpa"` and bfloat16; FlashAttention 2
+                is unsupported. Reduces decode kernel-launch overhead; end-to-end speedup depends on
+                the workload. Greedy codec and waveform parity passed the documented validation matrix.
+                Captures graphs on first use and reserves a static KV cache for the padded prompt and
+                requested token budget, rounded up to multiples of 1024 positions. Larger batches and
+                budgets require more GPU memory, even when speech ends early. CUDA out-of-memory errors
+                propagate as in ordinary generation; no automatic retry or budget reduction is performed.
             do_sample:
                 Whether to use sampling, recommended to be set to `true` for most use cases.
             top_k:
@@ -600,14 +622,15 @@ class Qwen3TTSModel:
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
-        talker_codes_list, _ = self.model.generate(
-            input_ids=input_ids,
-            ref_ids=ref_ids,
-            voice_clone_prompt=voice_clone_prompt_dict,
-            languages=languages,
-            non_streaming_mode=non_streaming_mode,
-            **gen_kwargs,
-        )
+        with self._cuda_graphs() if use_cuda_graph else contextlib.nullcontext():
+            talker_codes_list, _ = self.model.generate(
+                input_ids=input_ids,
+                ref_ids=ref_ids,
+                voice_clone_prompt=voice_clone_prompt_dict,
+                languages=languages,
+                non_streaming_mode=non_streaming_mode,
+                **gen_kwargs,
+            )
 
         codes_for_decode = []
         for i, codes in enumerate(talker_codes_list):
