@@ -50,6 +50,10 @@ def train():
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
     )
+    # The code predictor sees one 16-position sequence per audio frame, all frames of a batch in one call. The
+    # FlashAttention-2 backward pass fails above 8,192 such sequences (NaN gradients or an illegal memory access, see
+    # https://github.com/QwenLM/Qwen3-TTS/issues/378). Eager attention over 16 positions is cheap and has no limit.
+    qwen3tts.model.talker.code_predictor.config._attn_implementation = "eager"
     config = AutoConfig.from_pretrained(MODEL_PATH)
 
     train_data = open(args.train_jsonl).readlines()
